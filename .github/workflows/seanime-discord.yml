@@ -235,7 +235,7 @@ jobs:
                   display_title = title
 
               embed = {
-                  "title": "Download Complete",
+                  "title": "✅ Download Complete",
                   "description": f"**{display_title}**",
                   "fields": [
                       {
