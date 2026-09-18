@@ -1,350 +1,378 @@
-name: AllDebrid Download Notifications
+# AllDebrid Discord Download Notifier
 
+Automatically sends a Discord notification when a new download finishes processing in **AllDebrid**.
+
+Designed for setups where **Seanime** handles anime downloads, AllDebrid processes the magnets, and you want a Discord notification without keeping a PC or NAS running.
+
+## How It Works
+
+```text
+Seanime
+   │
+   ▼
+AllDebrid
+   │
+   │  Magnet finishes
+   ▼
+GitHub Actions
+   │
+   │  Checks every ~5 minutes
+   ▼
+Discord Webhook
+   │
+   ▼
+📢 Role Mention + Download Complete Embed
+```
+
+The workflow uses the AllDebrid API to check for magnets in the `Ready` state. When it finds a magnet that has not been notified before, it sends a Discord webhook notification.
+
+The workflow runs entirely on GitHub's hosted runners, so no computer or NAS needs to remain powered on.
+
+## Features
+
+* 🔄 Automatically checks AllDebrid for completed downloads
+* ⏱️ Runs approximately every 5 minutes
+* 📢 Mentions a specific Discord role
+* 📦 Shows the completed filename
+* 💾 Shows file size
+* 🖥️ Detects common video resolutions
+* 📝 Cleans up the anime title for the Discord embed
+* 🧠 Remembers previously notified downloads
+* 🔐 Uses GitHub Secrets for API credentials
+* 💻 No software installation required on the NAS
+* 📴 No PC needs to remain powered on
+* ▶️ Can also be triggered manually from GitHub Actions
+
+## Requirements
+
+You need:
+
+* A GitHub repository
+* GitHub Actions enabled
+* An AllDebrid account
+* An AllDebrid API key
+* A Discord server
+* A Discord webhook
+* A Discord role to mention
+
+## Repository Structure
+
+```text
+.
+├── .github/
+│   └── workflows/
+│       └── seanime-discord.yml
+│
+├── .alldebrid-notified.json
+│
+└── README.md
+```
+
+### `seanime-discord.yml`
+
+This is the GitHub Actions workflow that:
+
+1. Runs on a schedule.
+2. Connects to AllDebrid.
+3. Finds ready magnets.
+4. Checks whether they have already been notified.
+5. Sends a Discord notification for newly completed downloads.
+6. Saves the notified magnet IDs.
+7. Commits the updated state back to the repository.
+
+### `.alldebrid-notified.json`
+
+This file stores the AllDebrid magnet IDs that have already generated a Discord notification.
+
+Example:
+
+```json
+[
+  "757703954",
+  "757809908"
+]
+```
+
+This prevents the same download from generating repeated Discord messages.
+
+## GitHub Secrets
+
+The workflow requires two repository secrets.
+
+Go to:
+
+**Repository → Settings → Secrets and variables → Actions**
+
+Add:
+
+### `ALLDEBRID_API_KEY`
+
+Your AllDebrid API key.
+
+### `DISCORD_WEBHOOK_URL`
+
+Your Discord webhook URL.
+
+These values should **not** be placed directly inside the workflow file.
+
+The workflow accesses them through:
+
+```yaml
+${{ secrets.ALLDEBRID_API_KEY }}
+```
+
+and:
+
+```yaml
+${{ secrets.DISCORD_WEBHOOK_URL }}
+```
+
+## Discord Role Mention
+
+The workflow currently mentions this Discord role:
+
+```text
+1324095223655043092
+```
+
+The role is included using:
+
+```json
+{
+  "content": "<@&1324095223655043092>",
+  "allowed_mentions": {
+    "roles": ["1324095223655043092"]
+  }
+}
+```
+
+This produces a real Discord role mention rather than displaying the role ID as plain text.
+
+To use a different role, replace the role ID in both places.
+
+## Notification Example
+
+A completed download produces a notification similar to:
+
+```text
+@Anime Downloads
+
+Download Complete
+
+Frieren Episode 1
+
+Filename:
+Frieren - 01 [1080p].mkv
+
+File size:
+1.42 GB
+
+Resolution:
+1080p
+```
+
+The exact filename, size, title, and resolution depend on the completed AllDebrid download.
+
+## Schedule
+
+The workflow uses:
+
+```yaml
 on:
   schedule:
     - cron: "*/5 * * * *"
-  workflow_dispatch:
+```
 
-permissions:
-  contents: write
+This means GitHub schedules the workflow to run every 5 minutes.
 
-jobs:
-  check-alldebrid:
-    runs-on: ubuntu-latest
+GitHub's current documentation states that scheduled workflows have a minimum interval of 5 minutes. Scheduled runs can occasionally be delayed during periods of high GitHub Actions load.
 
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+The workflow also supports manual execution:
 
-      - name: Check AllDebrid for completed downloads
-        env:
-          ALLDEBRID_API_KEY: ${{ secrets.ALLDEBRID_API_KEY }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          python3 <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-          import sys
-          from pathlib import Path
-          from urllib.request import Request, urlopen
+```yaml
+workflow_dispatch:
+```
 
-          API_KEY = os.environ["ALLDEBRID_API_KEY"]
-          DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
+You can manually start it from:
 
-          STATE_FILE = Path(".alldebrid-notified.json")
+**GitHub → Actions → AllDebrid Download Notifications → Run workflow**
 
-          # ------------------------------------------------------------
-          # Load previously notified magnet IDs.
-          # ------------------------------------------------------------
-          if STATE_FILE.exists():
-              try:
-                  notified = set(json.loads(STATE_FILE.read_text()))
-              except Exception:
-                  notified = set()
-          else:
-              notified = set()
+Manual execution is useful for testing.
 
-          # ------------------------------------------------------------
-          # Get currently ready magnets from AllDebrid.
-          # ------------------------------------------------------------
-          request = Request(
-              "https://api.alldebrid.com/v4.1/magnet/status",
-              data=b"status=ready",
-              headers={
-                  "Authorization": f"Bearer {API_KEY}",
-                  "Content-Type": "application/x-www-form-urlencoded",
-              },
-              method="POST",
-          )
+## First Run
 
-          try:
-              with urlopen(request, timeout=30) as response:
-                  payload = json.load(response)
-          except Exception as e:
-              print(f"ERROR: Could not contact AllDebrid: {e}")
-              sys.exit(1)
+The first time the workflow runs, it creates the notification state.
 
-          if payload.get("status") != "success":
-              print("ERROR: AllDebrid returned an unsuccessful response.")
-              print(json.dumps(payload, indent=2))
-              sys.exit(1)
+Existing ready downloads are added to:
 
-          magnets = payload.get("data", {}).get("magnets", [])
+```text
+.alldebrid-notified.json
+```
 
-          print(f"Found {len(magnets)} ready AllDebrid magnet(s).")
+They are **not** sent to Discord.
 
-          # ------------------------------------------------------------
-          # First run:
-          # Don't spam Discord with downloads that were already complete
-          # before this workflow was installed.
-          # ------------------------------------------------------------
-          if not STATE_FILE.exists():
-              for magnet in magnets:
-                  if "id" in magnet:
-                      notified.add(str(magnet["id"]))
+This prevents the first run from flooding Discord with downloads that were already completed before the notifier was installed.
 
-              STATE_FILE.write_text(
-                  json.dumps(sorted(notified), indent=2)
-              )
+Only subsequently detected downloads generate notifications.
 
-              print(
-                  f"Initial state created with {len(notified)} "
-                  "already-ready magnet(s)."
-              )
+## Troubleshooting
 
-              # Commit initial state.
-              subprocess.run(
-                  ["git", "config", "user.name", "github-actions[bot]"],
-                  check=True,
-              )
-              subprocess.run(
-                  [
-                      "git",
-                      "config",
-                      "user.email",
-                      "41898282+github-actions[bot]@users.noreply.github.com",
-                  ],
-                  check=True,
-              )
+### Workflow runs but Discord does not receive a message
 
-              subprocess.run(
-                  ["git", "add", str(STATE_FILE)],
-                  check=True,
-              )
+Open:
 
-              result = subprocess.run(
-                  ["git", "diff", "--cached", "--quiet"]
-              )
+**GitHub → Actions → AllDebrid Download Notifications**
 
-              if result.returncode != 0:
-                  subprocess.run(
-                      [
-                          "git",
-                          "commit",
-                          "-m",
-                          "Initialize AllDebrid notification state",
-                      ],
-                      check=True,
-                  )
-                  subprocess.run(
-                      ["git", "push"],
-                      check=True,
-                  )
+Open the latest run and check the output.
 
-              print("Initial state complete. No Discord notifications sent.")
-              sys.exit(0)
+You should see something similar to:
 
-          # ------------------------------------------------------------
-          # Process newly completed magnets.
-          # ------------------------------------------------------------
-          newly_completed = []
+```text
+Found 1 ready AllDebrid magnet(s).
+Newly completed download(s): 1
+Discord notification sent for: example.mkv
+Done.
+```
 
-          for magnet in magnets:
-              magnet_id = str(magnet.get("id", ""))
+If you see:
 
-              if not magnet_id:
-                  continue
+```text
+Newly completed download(s): 0
+```
 
-              # AllDebrid statusCode 4 = Finished / Ready.
-              if magnet.get("statusCode") != 4:
-                  continue
+the magnet is probably already listed in:
 
-              if magnet_id in notified:
-                  continue
+```text
+.alldebrid-notified.json
+```
 
-              newly_completed.append(magnet)
+### The same download is being notified repeatedly
 
-          print(f"Newly completed download(s): {len(newly_completed)}")
+Check `.alldebrid-notified.json`.
 
-          # ------------------------------------------------------------
-          # Helper functions.
-          # ------------------------------------------------------------
-          def format_size(size):
-              if not size:
-                  return "Unknown"
+The magnet ID should be present after a successful Discord notification.
 
-              size = float(size)
+The workflow only adds the ID after Discord successfully accepts the notification.
 
-              units = ["B", "KB", "MB", "GB", "TB"]
+### GitHub Actions is not running
 
-              for unit in units:
-                  if size < 1024 or unit == units[-1]:
-                      return f"{size:.2f} {unit}"
-                  size /= 1024
+Make sure:
 
-              return "Unknown"
+* The workflow exists in `.github/workflows/`
+* The workflow is committed to the repository's default branch
+* GitHub Actions is enabled
+* The schedule is still set to `*/5 * * * *`
 
-          def find_resolution(filename):
-              if not filename:
-                  return "Unknown"
+Scheduled workflows run from the default branch. GitHub also notes that scheduled runs can be delayed during high-load periods.
 
-              match = re.search(
-                  r"(?<!\d)(2160p|1440p|1080p|900p|720p|576p|480p|360p)(?!\d)",
-                  filename,
-                  re.IGNORECASE,
-              )
+### Discord role is not being pinged
 
-              if match:
-                  return match.group(1).lower()
+Verify:
 
-              # Common alternate naming.
-              match = re.search(
-                  r"(?<!\d)(4K|8K)(?!\d)",
-                  filename,
-                  re.IGNORECASE,
-              )
+1. The role ID is correct.
+2. The role is still present in the Discord server.
+3. The webhook's channel permissions allow the appropriate mentions.
+4. The role ID appears in both `content` and `allowed_mentions`.
 
-              if match:
-                  return match.group(1).upper()
+## Security
 
-              return "Unknown"
+### Never commit secrets
 
-          def clean_title(filename):
-              if not filename:
-                  return "Download"
+Do **not** put your AllDebrid API key or Discord webhook URL directly into the repository.
 
-              name = Path(filename).stem
+Use GitHub Secrets instead.
 
-              # Convert common separators to spaces.
-              name = re.sub(r"[._]+", " ", name)
-              name = re.sub(r"\s+", " ", name)
+If a secret is accidentally committed to a public repository, immediately rotate/revoke it.
 
-              return name.strip()
+### `.alldebrid-notified.json` is safe to commit
 
-          def send_discord(magnet):
-              filename = magnet.get("filename") or "Unknown"
-              size = format_size(magnet.get("size"))
-              resolution = find_resolution(filename)
+This file contains only AllDebrid magnet IDs used to track which downloads have already generated notifications.
 
-              title = clean_title(filename)
+It does not contain your API key or Discord webhook URL.
 
-              # Try to remove obvious release metadata from the title.
-              # This keeps the Discord notification readable while leaving
-              # the complete filename in the Filename field.
-              display_title = re.sub(
-                  r"\b(2160p|1440p|1080p|720p|576p|480p|360p|WEB[- ]?DL|WEB[- ]?Rip|BluRay|HEVC|x264|x265|H\.264|H\.265)\b",
-                  "",
-                  title,
-                  flags=re.IGNORECASE,
-              )
-              display_title = re.sub(r"\s+", " ", display_title).strip()
+## Changing the Discord Role
 
-              if not display_title:
-                  display_title = title
+To change the role being mentioned, edit:
 
-              embed = {
-                  "title": "Download Complete",
-                  "description": f"**{display_title}**",
-                  "fields": [
-                      {
-                          "name": "Filename:",
-                          "value": f"`{filename}`",
-                          "inline": False,
-                      },
-                      {
-                          "name": "File size:",
-                          "value": size,
-                          "inline": True,
-                      },
-                      {
-                          "name": "Resolution:",
-                          "value": resolution,
-                          "inline": True,
-                      },
-                  ],
-                  "timestamp": (
-                      __import__("datetime")
-                      .datetime.now(__import__("datetime").timezone.utc)
-                      .isoformat()
-                  ),
-              }
+```python
+"content": "<@&1324095223655043092>",
+```
 
-              body = json.dumps({
-                  "content": "<@&1324095223655043092>",
-                  "allowed_mentions": {
-                      "roles": ["1324095223655043092"]
-                  },
-                  "embeds": [embed]
-              }).encode("utf-8")
+and:
 
-              request = Request(
-                  DISCORD_WEBHOOK,
-                  data=body,
-                  headers={
-                      "Content-Type": "application/json",
-                      "User-Agent": "AllDebrid-Discord-Notifier",
-                  },
-                  method="POST",
-              )
+```python
+"roles": ["1324095223655043092"]
+```
 
-              try:
-                  with urlopen(request, timeout=30) as response:
-                      if response.status not in (200, 204):
-                          raise RuntimeError(
-                              f"Discord returned HTTP {response.status}"
-                          )
-              except Exception as e:
-                  print(f"ERROR sending Discord notification: {e}")
-                  return False
+Replace `1324095223655043092` with the new role ID.
 
-              print(f"Discord notification sent for: {filename}")
-              return True
+Both values should use the same role ID.
 
-          # ------------------------------------------------------------
-          # Send notifications.
-          # ------------------------------------------------------------
-          for magnet in newly_completed:
-              magnet_id = str(magnet["id"])
+## Changing the Schedule
 
-              if send_discord(magnet):
-                  notified.add(magnet_id)
+The current schedule is:
 
-          # ------------------------------------------------------------
-          # Save state.
-          # ------------------------------------------------------------
-          STATE_FILE.write_text(
-              json.dumps(sorted(notified), indent=2)
-          )
+```yaml
+cron: "*/5 * * * *"
+```
 
-          # ------------------------------------------------------------
-          # Commit updated state.
-          # ------------------------------------------------------------
-          subprocess.run(
-              ["git", "config", "user.name", "github-actions[bot]"],
-              check=True,
-          )
+This is the minimum supported GitHub Actions schedule interval.
 
-          subprocess.run(
-              [
-                  "git",
-                  "config",
-                  "user.email",
-                  "41898282+github-actions[bot]@users.noreply.github.com",
-              ],
-              check=True,
-          )
+Do not change it to:
 
-          subprocess.run(
-              ["git", "add", str(STATE_FILE)],
-              check=True,
-          )
+```yaml
+*/1 * * * *
+```
 
-          result = subprocess.run(
-              ["git", "diff", "--cached", "--quiet"]
-          )
+GitHub Actions does not support scheduled workflows more frequently than once every 5 minutes.
 
-          if result.returncode != 0:
-              subprocess.run(
-                  ["git", "commit", "-m", "Update AllDebrid notification state"],
-                  check=True,
-              )
+## Why GitHub Actions?
 
-              subprocess.run(
-                  ["git", "push"],
-                  check=True,
-              )
+This setup was designed around a few specific requirements:
 
-          print("Done.")
-          PY
+* No PC needs to stay powered on.
+* Nothing needs to be installed on the NAS.
+* AllDebrid remains responsible for processing the download.
+* GitHub provides the cloud execution environment.
+* Discord provides the notification.
+* The repository stores the small amount of state needed to prevent duplicate notifications.
+
+GitHub Actions workflows are defined in `.github/workflows/` and can run on scheduled triggers.
+
+## Data Flow & Privacy
+
+The workflow communicates with:
+
+**AllDebrid**
+
+Used to check the status of your magnets.
+
+**Discord**
+
+Used to send the download notification through your webhook.
+
+**GitHub Actions**
+
+Runs the notifier script and stores the notification state in the repository.
+
+Your AllDebrid API key and Discord webhook URL are provided to the workflow through GitHub Secrets.
+
+## Credits
+
+Built for a Seanime + AllDebrid setup using GitHub Actions and Discord webhooks.
+
+---
+
+### Status
+
+**Working setup:** ✅
+
+**Automatic checking:** ✅
+
+**Discord notifications:** ✅
+
+**Role mentions:** ✅
+
+**PC required:** ❌
+
+**NAS software required:** ❌
