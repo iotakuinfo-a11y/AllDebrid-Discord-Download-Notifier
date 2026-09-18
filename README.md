@@ -39,7 +39,7 @@ The workflow runs entirely on GitHub's hosted runners, so no computer or NAS nee
 * 📝 Cleans up the anime title for the Discord embed
 * 🧠 Remembers previously notified downloads
 * 🔐 Uses GitHub Secrets for API credentials
-* 💻 No software installation required on the NAS
+* 💻 No software installation required
 * 📴 No PC needs to remain powered on
 * ▶️ Can also be triggered manually from GitHub Actions
 
@@ -331,7 +331,6 @@ GitHub Actions does not support scheduled workflows more frequently than once ev
 This setup was designed around a few specific requirements:
 
 * No PC needs to stay powered on.
-* Nothing needs to be installed on the NAS.
 * AllDebrid remains responsible for processing the download.
 * GitHub provides the cloud execution environment.
 * Discord provides the notification.
