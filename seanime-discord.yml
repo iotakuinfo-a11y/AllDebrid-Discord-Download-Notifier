@@ -1,0 +1,346 @@
+name: AllDebrid Download Notifications
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-alldebrid:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check AllDebrid for completed downloads
+        env:
+          ALLDEBRID_API_KEY: ${{ secrets.ALLDEBRID_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+
+          API_KEY = os.environ["ALLDEBRID_API_KEY"]
+          DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
+
+          STATE_FILE = Path(".alldebrid-notified.json")
+
+          # ------------------------------------------------------------
+          # Load previously notified magnet IDs.
+          # ------------------------------------------------------------
+          if STATE_FILE.exists():
+              try:
+                  notified = set(json.loads(STATE_FILE.read_text()))
+              except Exception:
+                  notified = set()
+          else:
+              notified = set()
+
+          # ------------------------------------------------------------
+          # Get currently ready magnets from AllDebrid.
+          # ------------------------------------------------------------
+          request = Request(
+              "https://api.alldebrid.com/v4.1/magnet/status",
+              data=b"status=ready",
+              headers={
+                  "Authorization": f"Bearer {API_KEY}",
+                  "Content-Type": "application/x-www-form-urlencoded",
+              },
+              method="POST",
+          )
+
+          try:
+              with urlopen(request, timeout=30) as response:
+                  payload = json.load(response)
+          except Exception as e:
+              print(f"ERROR: Could not contact AllDebrid: {e}")
+              sys.exit(1)
+
+          if payload.get("status") != "success":
+              print("ERROR: AllDebrid returned an unsuccessful response.")
+              print(json.dumps(payload, indent=2))
+              sys.exit(1)
+
+          magnets = payload.get("data", {}).get("magnets", [])
+
+          print(f"Found {len(magnets)} ready AllDebrid magnet(s).")
+
+          # ------------------------------------------------------------
+          # First run:
+          # Don't spam Discord with downloads that were already complete
+          # before this workflow was installed.
+          # ------------------------------------------------------------
+          if not STATE_FILE.exists():
+              for magnet in magnets:
+                  if "id" in magnet:
+                      notified.add(str(magnet["id"]))
+
+              STATE_FILE.write_text(
+                  json.dumps(sorted(notified), indent=2)
+              )
+
+              print(
+                  f"Initial state created with {len(notified)} "
+                  "already-ready magnet(s)."
+              )
+
+              # Commit initial state.
+              subprocess.run(
+                  ["git", "config", "user.name", "github-actions[bot]"],
+                  check=True,
+              )
+              subprocess.run(
+                  [
+                      "git",
+                      "config",
+                      "user.email",
+                      "41898282+github-actions[bot]@users.noreply.github.com",
+                  ],
+                  check=True,
+              )
+
+              subprocess.run(
+                  ["git", "add", str(STATE_FILE)],
+                  check=True,
+              )
+
+              result = subprocess.run(
+                  ["git", "diff", "--cached", "--quiet"]
+              )
+
+              if result.returncode != 0:
+                  subprocess.run(
+                      [
+                          "git",
+                          "commit",
+                          "-m",
+                          "Initialize AllDebrid notification state",
+                      ],
+                      check=True,
+                  )
+                  subprocess.run(
+                      ["git", "push"],
+                      check=True,
+                  )
+
+              print("Initial state complete. No Discord notifications sent.")
+              sys.exit(0)
+
+          # ------------------------------------------------------------
+          # Process newly completed magnets.
+          # ------------------------------------------------------------
+          newly_completed = []
+
+          for magnet in magnets:
+              magnet_id = str(magnet.get("id", ""))
+
+              if not magnet_id:
+                  continue
+
+              # AllDebrid statusCode 4 = Finished / Ready.
+              if magnet.get("statusCode") != 4:
+                  continue
+
+              if magnet_id in notified:
+                  continue
+
+              newly_completed.append(magnet)
+
+          print(f"Newly completed download(s): {len(newly_completed)}")
+
+          # ------------------------------------------------------------
+          # Helper functions.
+          # ------------------------------------------------------------
+          def format_size(size):
+              if not size:
+                  return "Unknown"
+
+              size = float(size)
+
+              units = ["B", "KB", "MB", "GB", "TB"]
+
+              for unit in units:
+                  if size < 1024 or unit == units[-1]:
+                      return f"{size:.2f} {unit}"
+                  size /= 1024
+
+              return "Unknown"
+
+          def find_resolution(filename):
+              if not filename:
+                  return "Unknown"
+
+              match = re.search(
+                  r"(?<!\d)(2160p|1440p|1080p|900p|720p|576p|480p|360p)(?!\d)",
+                  filename,
+                  re.IGNORECASE,
+              )
+
+              if match:
+                  return match.group(1).lower()
+
+              # Common alternate naming.
+              match = re.search(
+                  r"(?<!\d)(4K|8K)(?!\d)",
+                  filename,
+                  re.IGNORECASE,
+              )
+
+              if match:
+                  return match.group(1).upper()
+
+              return "Unknown"
+
+          def clean_title(filename):
+              if not filename:
+                  return "Download"
+
+              name = Path(filename).stem
+
+              # Convert common separators to spaces.
+              name = re.sub(r"[._]+", " ", name)
+              name = re.sub(r"\s+", " ", name)
+
+              return name.strip()
+
+          def send_discord(magnet):
+              filename = magnet.get("filename") or "Unknown"
+              size = format_size(magnet.get("size"))
+              resolution = find_resolution(filename)
+
+              title = clean_title(filename)
+
+              # Try to remove obvious release metadata from the title.
+              # This keeps the Discord notification readable while leaving
+              # the complete filename in the Filename field.
+              display_title = re.sub(
+                  r"\b(2160p|1440p|1080p|720p|576p|480p|360p|WEB[- ]?DL|WEB[- ]?Rip|BluRay|HEVC|x264|x265|H\.264|H\.265)\b",
+                  "",
+                  title,
+                  flags=re.IGNORECASE,
+              )
+              display_title = re.sub(r"\s+", " ", display_title).strip()
+
+              if not display_title:
+                  display_title = title
+
+              embed = {
+                  "title": "Download Complete",
+                  "description": f"**{display_title}**",
+                  "fields": [
+                      {
+                          "name": "Filename:",
+                          "value": f"`{filename}`",
+                          "inline": False,
+                      },
+                      {
+                          "name": "File size:",
+                          "value": size,
+                          "inline": True,
+                      },
+                      {
+                          "name": "Resolution:",
+                          "value": resolution,
+                          "inline": True,
+                      },
+                  ],
+                  "timestamp": (
+                      __import__("datetime")
+                      .datetime.now(__import__("datetime").timezone.utc)
+                      .isoformat()
+                  ),
+              }
+
+              body = json.dumps({
+                  "embeds": [embed]
+              }).encode("utf-8")
+
+              request = Request(
+                  DISCORD_WEBHOOK,
+                  data=body,
+                  headers={
+                      "Content-Type": "application/json",
+                      "User-Agent": "AllDebrid-Discord-Notifier",
+                  },
+                  method="POST",
+              )
+
+              try:
+                  with urlopen(request, timeout=30) as response:
+                      if response.status not in (200, 204):
+                          raise RuntimeError(
+                              f"Discord returned HTTP {response.status}"
+                          )
+              except Exception as e:
+                  print(f"ERROR sending Discord notification: {e}")
+                  return False
+
+              print(f"Discord notification sent for: {filename}")
+              return True
+
+          # ------------------------------------------------------------
+          # Send notifications.
+          # ------------------------------------------------------------
+          for magnet in newly_completed:
+              magnet_id = str(magnet["id"])
+
+              if send_discord(magnet):
+                  notified.add(magnet_id)
+
+          # ------------------------------------------------------------
+          # Save state.
+          # ------------------------------------------------------------
+          STATE_FILE.write_text(
+              json.dumps(sorted(notified), indent=2)
+          )
+
+          # ------------------------------------------------------------
+          # Commit updated state.
+          # ------------------------------------------------------------
+          subprocess.run(
+              ["git", "config", "user.name", "github-actions[bot]"],
+              check=True,
+          )
+
+          subprocess.run(
+              [
+                  "git",
+                  "config",
+                  "user.email",
+                  "41898282+github-actions[bot]@users.noreply.github.com",
+              ],
+              check=True,
+          )
+
+          subprocess.run(
+              ["git", "add", str(STATE_FILE)],
+              check=True,
+          )
+
+          result = subprocess.run(
+              ["git", "diff", "--cached", "--quiet"]
+          )
+
+          if result.returncode != 0:
+              subprocess.run(
+                  ["git", "commit", "-m", "Update AllDebrid notification state"],
+                  check=True,
+              )
+
+              subprocess.run(
+                  ["git", "push"],
+                  check=True,
+              )
+
+          print("Done.")
+          PY
