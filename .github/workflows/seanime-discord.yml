@@ -262,6 +262,10 @@ jobs:
               }
 
               body = json.dumps({
+                  "content": "<@&1324095223655043092>",
+                  "allowed_mentions": {
+                      "roles": ["1324095223655043092"]
+                  },
                   "embeds": [embed]
               }).encode("utf-8")
 
